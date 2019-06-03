@@ -1,4 +1,4 @@
-// Copyright 2018 The Go Authors. All rights reserved.
+// Copyright 2018 The mkcert Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -39,25 +39,26 @@ func init() {
 		hasJava = true
 		javaHome = v
 
-		_, err := os.Stat(filepath.Join(v, keytoolPath))
-		if err == nil {
+		if pathExists(filepath.Join(v, keytoolPath)) {
 			hasKeytool = true
 			keytoolPath = filepath.Join(v, keytoolPath)
 		}
 
-		_, err = os.Stat(filepath.Join(v, "lib", "security", "cacerts"))
-		if err == nil {
+		if pathExists(filepath.Join(v, "lib", "security", "cacerts")) {
 			cacertsPath = filepath.Join(v, "lib", "security", "cacerts")
 		}
 
-		_, err = os.Stat(filepath.Join(v, "jre", "lib", "security", "cacerts"))
-		if err == nil {
+		if pathExists(filepath.Join(v, "jre", "lib", "security", "cacerts")) {
 			cacertsPath = filepath.Join(v, "jre", "lib", "security", "cacerts")
 		}
 	}
 }
 
 func (m *mkcert) checkJava() bool {
+	if !hasKeytool {
+		return false
+	}
+
 	// exists returns true if the given x509.Certificate's fingerprint
 	// is in the keytool -list output
 	exists := func(c *x509.Certificate, h hash.Hash, keytoolOutput []byte) bool {
@@ -108,7 +109,7 @@ func (m *mkcert) uninstallJava() {
 // the command wrapped in 'sudo' to work around file permissions.
 func (m *mkcert) execKeytool(cmd *exec.Cmd) ([]byte, error) {
 	out, err := cmd.CombinedOutput()
-	if err != nil && bytes.Contains(out, []byte("java.io.FileNotFoundException")) {
+	if err != nil && bytes.Contains(out, []byte("java.io.FileNotFoundException")) && runtime.GOOS != "windows" {
 		origArgs := cmd.Args[1:]
 		cmd = exec.Command("sudo", keytoolPath)
 		cmd.Args = append(cmd.Args, origArgs...)

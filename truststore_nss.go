@@ -1,3 +1,7 @@
+// Copyright 2018 The mkcert Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
@@ -13,34 +17,44 @@ var (
 	hasNSS       bool
 	hasCertutil  bool
 	certutilPath string
-	nssDB        = filepath.Join(os.Getenv("HOME"), ".pki/nssdb")
+	nssDBs       = []string{
+		filepath.Join(os.Getenv("HOME"), ".pki/nssdb"),
+		filepath.Join(os.Getenv("HOME"), "snap/chromium/current/.pki/nssdb"), // Snapcraft
+		"/etc/pki/nssdb", // CentOS 7
+	}
+	firefoxPaths = []string{
+		"/usr/bin/firefox", "/Applications/Firefox.app",
+		"/Applications/Firefox Developer Edition.app",
+		"/Applications/Firefox Nightly.app",
+		"C:\\Program Files\\Mozilla Firefox",
+	}
 )
 
 func init() {
-	for _, path := range []string{
-		"/usr/bin/firefox", nssDB, "/Applications/Firefox.app",
-		"/Applications/Firefox Developer Edition.app",
-		"C:\\Program Files\\Mozilla Firefox",
-	} {
-		_, err := os.Stat(path)
-		hasNSS = hasNSS || err == nil
+	allPaths := append(append([]string{}, nssDBs...), firefoxPaths...)
+	for _, path := range allPaths {
+		if pathExists(path) {
+			hasNSS = true
+			break
+		}
 	}
 
 	switch runtime.GOOS {
 	case "darwin":
-		out, err := exec.Command("brew", "--prefix", "nss").Output()
-		if err != nil {
-			return
+		if hasCertutil = binaryExists("certutil"); hasCertutil {
+			certutilPath, _ = exec.LookPath("certutil")
+		} else {
+			out, err := exec.Command("brew", "--prefix", "nss").Output()
+			if err == nil {
+				certutilPath = filepath.Join(strings.TrimSpace(string(out)), "bin", "certutil")
+				hasCertutil = pathExists(certutilPath)
+			}
 		}
-		certutilPath = filepath.Join(strings.TrimSpace(string(out)), "bin", "certutil")
-
-		_, err = os.Stat(certutilPath)
-		hasCertutil = err == nil
 
 	case "linux":
-		var err error
-		certutilPath, err = exec.LookPath("certutil")
-		hasCertutil = err == nil
+		if hasCertutil = binaryExists("certutil"); hasCertutil {
+			certutilPath, _ = exec.LookPath("certutil")
+		}
 	}
 }
 
@@ -91,22 +105,15 @@ func (m *mkcert) uninstallNSS() {
 
 func (m *mkcert) forEachNSSProfile(f func(profile string)) (found int) {
 	profiles, _ := filepath.Glob(FirefoxProfile)
-	if _, err := os.Stat(nssDB); err == nil {
-		profiles = append(profiles, nssDB)
-	}
-	if len(profiles) == 0 {
-		return
-	}
+	profiles = append(profiles, nssDBs...)
 	for _, profile := range profiles {
 		if stat, err := os.Stat(profile); err != nil || !stat.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(profile, "cert9.db")); err == nil {
+		if pathExists(filepath.Join(profile, "cert9.db")) {
 			f("sql:" + profile)
 			found++
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(profile, "cert8.db")); err == nil {
+		} else if pathExists(filepath.Join(profile, "cert8.db")) {
 			f("dbm:" + profile)
 			found++
 		}

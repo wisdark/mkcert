@@ -1,4 +1,4 @@
-// Copyright 2018 The Go Authors. All rights reserved.
+// Copyright 2018 The mkcert Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -16,15 +16,23 @@ import (
 )
 
 var (
-	FirefoxProfile      = os.Getenv("HOME") + "/.mozilla/firefox/*"
-	CertutilInstallHelp = `apt install libnss3-tools" or "yum install nss-tools`
-	NSSBrowsers         = "Firefox and/or Chrome/Chromium"
+	FirefoxProfile = os.Getenv("HOME") + "/.mozilla/firefox/*"
+	NSSBrowsers    = "Firefox and/or Chrome/Chromium"
 
 	SystemTrustFilename string
 	SystemTrustCommand  []string
+	CertutilInstallHelp string
 )
 
 func init() {
+	switch {
+	case binaryExists("apt"):
+		CertutilInstallHelp = "apt install libnss3-tools"
+	case binaryExists("yum"):
+		CertutilInstallHelp = "yum install nss-tools"
+	case binaryExists("zypper"):
+		CertutilInstallHelp = "zypper install mozilla-nss-tools"
+	}
 	if pathExists("/etc/pki/ca-trust/source/anchors/") {
 		SystemTrustFilename = "/etc/pki/ca-trust/source/anchors/%s.pem"
 		SystemTrustCommand = []string{"update-ca-trust", "extract"}
@@ -34,18 +42,13 @@ func init() {
 	} else if pathExists("/etc/ca-certificates/trust-source/anchors/") {
 		SystemTrustFilename = "/etc/ca-certificates/trust-source/anchors/%s.crt"
 		SystemTrustCommand = []string{"trust", "extract-compat"}
+	} else if pathExists("/usr/share/pki/trust/anchors") {
+		SystemTrustFilename = "/usr/share/pki/trust/anchors/%s.pem"
+		SystemTrustCommand = []string{"update-ca-certificates"}
 	}
-	if SystemTrustCommand != nil {
-		_, err := exec.LookPath(SystemTrustCommand[0])
-		if err != nil {
-			SystemTrustCommand = nil
-		}
+	if SystemTrustCommand != nil && !binaryExists(SystemTrustCommand[0]) {
+		SystemTrustCommand = nil
 	}
-}
-
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func (m *mkcert) systemTrustFilename() string {
@@ -99,7 +102,7 @@ func (m *mkcert) uninstallPlatform() bool {
 }
 
 func CommandWithSudo(cmd ...string) *exec.Cmd {
-	if _, err := exec.LookPath("sudo"); err != nil {
+	if !binaryExists("sudo") {
 		return exec.Command(cmd[0], cmd[1:]...)
 	}
 	return exec.Command("sudo", append([]string{"--"}, cmd...)...)
