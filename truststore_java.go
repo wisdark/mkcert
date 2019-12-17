@@ -87,7 +87,7 @@ func (m *mkcert) installJava() {
 		"-alias", m.caUniqueName(),
 	}
 
-	out, err := m.execKeytool(exec.Command(keytoolPath, args...))
+	out, err := execKeytool(exec.Command(keytoolPath, args...))
 	fatalIfCmdErr(err, "keytool -importcert", out)
 }
 
@@ -98,7 +98,7 @@ func (m *mkcert) uninstallJava() {
 		"-keystore", cacertsPath,
 		"-storepass", storePass,
 	}
-	out, err := m.execKeytool(exec.Command(keytoolPath, args...))
+	out, err := execKeytool(exec.Command(keytoolPath, args...))
 	if bytes.Contains(out, []byte("does not exist")) {
 		return // cert didn't exist
 	}
@@ -106,12 +106,12 @@ func (m *mkcert) uninstallJava() {
 }
 
 // execKeytool will execute a "keytool" command and if needed re-execute
-// the command wrapped in 'sudo' to work around file permissions.
-func (m *mkcert) execKeytool(cmd *exec.Cmd) ([]byte, error) {
+// the command with commandWithSudo to work around file permissions.
+func execKeytool(cmd *exec.Cmd) ([]byte, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil && bytes.Contains(out, []byte("java.io.FileNotFoundException")) && runtime.GOOS != "windows" {
 		origArgs := cmd.Args[1:]
-		cmd = exec.Command("sudo", keytoolPath)
+		cmd = commandWithSudo(cmd.Path)
 		cmd.Args = append(cmd.Args, origArgs...)
 		cmd.Env = []string{
 			"JAVA_HOME=" + javaHome,

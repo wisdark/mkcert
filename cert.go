@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"net"
 	"net/mail"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -63,7 +64,13 @@ func (m *mkcert) makeCert(hosts []string) {
 		},
 
 		NotAfter:  time.Now().AddDate(10, 0, 0),
-		NotBefore: time.Now(),
+
+		// Fix the notBefore to temporarily bypass macOS Catalina's limit on
+		// certificate lifespan. Once mkcert provides an ACME server, automation
+		// will be the recommended way to guarantee uninterrupted functionality,
+		// and the lifespan will be shortened to 825 days. See issue 174 and
+		// https://support.apple.com/en-us/HT210176.
+		NotBefore: time.Date(2019, time.June, 1, 0, 0, 0, 0, time.UTC),
 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
@@ -74,13 +81,15 @@ func (m *mkcert) makeCert(hosts []string) {
 			tpl.IPAddresses = append(tpl.IPAddresses, ip)
 		} else if email, err := mail.ParseAddress(h); err == nil && email.Address == h {
 			tpl.EmailAddresses = append(tpl.EmailAddresses, h)
+		} else if uriName, err := url.Parse(h); err == nil && uriName.Scheme != "" && uriName.Host != "" {
+			tpl.URIs = append(tpl.URIs, uriName)
 		} else {
 			tpl.DNSNames = append(tpl.DNSNames, h)
 		}
 	}
 
 	if m.client {
-		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
 	} else if len(tpl.IPAddresses) > 0 || len(tpl.DNSNames) > 0 {
 		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 	}

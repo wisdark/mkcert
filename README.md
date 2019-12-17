@@ -67,13 +67,13 @@ Then you can install using [Linuxbrew](http://linuxbrew.sh/)
 
 ```
 brew install mkcert
-````
+```
 
-or build from source (requires Go 1.10+)
+or build from source (requires Go 1.13+)
 
 ```
-go get -u github.com/FiloSottile/mkcert
-$(go env GOPATH)/bin/mkcert
+git clone https://github.com/FiloSottile/mkcert
+go build -ldflags "-X main.Version=$(git describe --tags)"
 ```
 
 or use [the pre-built binaries](https://github.com/FiloSottile/mkcert/releases).
@@ -88,7 +88,7 @@ makepkg -si
 
 ### Windows
 
-On Windows, use Chocolatey
+On Windows, use [Chocolatey](https://chocolatey.org)
 
 ```
 choco install mkcert
@@ -142,6 +142,14 @@ To only install the local root CA into a subset of them, you can set the `TRUST_
 	-csr CSR
 	    Generate a certificate based on the supplied CSR. Conflicts with
 	    all other flags and arguments except -install and -cert-file.
+```
+
+> **Note:** You _must_ place these options before the domain names list.
+
+#### Example
+
+```
+mkcert -key-file key.pem -cert-file cert.pem example.com *.example.com
 ```
 
 ### S/MIME

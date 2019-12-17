@@ -13,12 +13,15 @@ import (
 	"log"
 	"net"
 	"net/mail"
+	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/idna"
 )
@@ -75,6 +78,9 @@ const advancedUsage = `Advanced options:
 
 `
 
+// Version is set more precisely at build time.
+var Version = "v1.4.1-dev"
+
 func main() {
 	log.SetFlags(0)
 	var (
@@ -89,15 +95,20 @@ func main() {
 		certFileFlag  = flag.String("cert-file", "", "")
 		keyFileFlag   = flag.String("key-file", "", "")
 		p12FileFlag   = flag.String("p12-file", "", "")
+		versionFlag   = flag.Bool("version", false, "")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), shortUsage)
+		fmt.Fprint(flag.CommandLine.Output(), shortUsage)
 		fmt.Fprintln(flag.CommandLine.Output(), `For more options, run "mkcert -help".`)
 	}
 	flag.Parse()
 	if *helpFlag {
-		fmt.Fprintf(flag.CommandLine.Output(), shortUsage)
-		fmt.Fprintf(flag.CommandLine.Output(), advancedUsage)
+		fmt.Fprint(flag.CommandLine.Output(), shortUsage)
+		fmt.Fprint(flag.CommandLine.Output(), advancedUsage)
+		return
+	}
+	if *versionFlag {
+		fmt.Println(Version)
 		return
 	}
 	if *carootFlag {
@@ -195,13 +206,16 @@ func (m *mkcert) Run(args []string) {
 		if email, err := mail.ParseAddress(name); err == nil && email.Address == name {
 			continue
 		}
+		if uriName, err := url.Parse(name); err == nil && uriName.Scheme != "" && uriName.Host != "" {
+			continue
+		}
 		punycode, err := idna.ToASCII(name)
 		if err != nil {
-			log.Fatalf("ERROR: %q is not a valid hostname, IP, or email: %s", name, err)
+			log.Fatalf("ERROR: %q is not a valid hostname, IP, URL or email: %s", name, err)
 		}
 		args[i] = punycode
 		if !hostnameRegexp.MatchString(punycode) {
-			log.Fatalf("ERROR: %q is not a valid hostname, IP, or email", name)
+			log.Fatalf("ERROR: %q is not a valid hostname, IP, URL or email", name)
 		}
 	}
 
@@ -236,37 +250,43 @@ func getCAROOT() string {
 }
 
 func (m *mkcert) install() {
-	var printed bool
-	if storeEnabled("system") && !m.checkPlatform() {
-		if m.installPlatform() {
-			log.Print("The local CA is now installed in the system trust store! ⚡️")
-		}
-		m.ignoreCheckFailure = true // TODO: replace with a check for a successful install
-		printed = true
-	}
-	if storeEnabled("nss") && hasNSS && !m.checkNSS() {
-		if hasCertutil && m.installNSS() {
-			log.Printf("The local CA is now installed in the %s trust store (requires browser restart)! 🦊", NSSBrowsers)
-		} else if CertutilInstallHelp == "" {
-			log.Printf(`Note: %s support is not available on your platform. ℹ️`, NSSBrowsers)
-		} else if !hasCertutil {
-			log.Printf(`Warning: "certutil" is not available, so the CA can't be automatically installed in %s! ⚠️`, NSSBrowsers)
-			log.Printf(`Install "certutil" with "%s" and re-run "mkcert -install" 👈`, CertutilInstallHelp)
-		}
-		printed = true
-	}
-	if storeEnabled("java") && hasJava && !m.checkJava() {
-		if hasKeytool {
-			m.installJava()
-			log.Println("The local CA is now installed in Java's trust store! ☕️")
+	if storeEnabled("system") {
+		if m.checkPlatform() {
+			log.Print("The local CA is already installed in the system trust store! 👍")
 		} else {
-			log.Println(`Warning: "keytool" is not available, so the CA can't be automatically installed in Java's trust store! ⚠️`)
+			if m.installPlatform() {
+				log.Print("The local CA is now installed in the system trust store! ⚡️")
+			}
+			m.ignoreCheckFailure = true // TODO: replace with a check for a successful install
 		}
-		printed = true
 	}
-	if printed {
-		log.Print("")
+	if storeEnabled("nss") && hasNSS {
+		if m.checkNSS() {
+			log.Printf("The local CA is already installed in the %s trust store! 👍", NSSBrowsers)
+		} else {
+			if hasCertutil && m.installNSS() {
+				log.Printf("The local CA is now installed in the %s trust store (requires browser restart)! 🦊", NSSBrowsers)
+			} else if CertutilInstallHelp == "" {
+				log.Printf(`Note: %s support is not available on your platform. ℹ️`, NSSBrowsers)
+			} else if !hasCertutil {
+				log.Printf(`Warning: "certutil" is not available, so the CA can't be automatically installed in %s! ⚠️`, NSSBrowsers)
+				log.Printf(`Install "certutil" with "%s" and re-run "mkcert -install" 👈`, CertutilInstallHelp)
+			}
+		}
 	}
+	if storeEnabled("java") && hasJava {
+		if m.checkJava() {
+			log.Println("The local CA is already installed in Java's trust store! 👍")
+		} else {
+			if hasKeytool {
+				m.installJava()
+				log.Println("The local CA is now installed in Java's trust store! ☕️")
+			} else {
+				log.Println(`Warning: "keytool" is not available, so the CA can't be automatically installed in Java's trust store! ⚠️`)
+			}
+		}
+	}
+	log.Print("")
 }
 
 func (m *mkcert) uninstall() {
@@ -340,4 +360,19 @@ func pathExists(path string) bool {
 func binaryExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+var sudoWarningOnce sync.Once
+
+func commandWithSudo(cmd ...string) *exec.Cmd {
+	if u, err := user.Current(); err == nil && u.Uid == "0" {
+		return exec.Command(cmd[0], cmd[1:]...)
+	}
+	if !binaryExists("sudo") {
+		sudoWarningOnce.Do(func() {
+			log.Println(`Warning: "sudo" is not available, and mkcert is not running as root. The (un)install operation might fail. ⚠️`)
+		})
+		return exec.Command(cmd[0], cmd[1:]...)
+	}
+	return exec.Command("sudo", append([]string{"--prompt=Sudo password:", "--"}, cmd...)...)
 }
