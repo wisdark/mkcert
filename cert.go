@@ -56,6 +56,11 @@ func (m *mkcert) makeCert(hosts []string) {
 	fatalIfErr(err, "failed to generate certificate key")
 	pub := priv.(crypto.Signer).Public()
 
+	// Certificates last for 2 years and 3 months, which is always less than
+	// 825 days, the limit that macOS/iOS apply to all certificates,
+	// including custom roots. See https://support.apple.com/en-us/HT210176.
+	expiration := time.Now().AddDate(2, 3, 0)
+
 	tpl := &x509.Certificate{
 		SerialNumber: randomSerialNumber(),
 		Subject: pkix.Name{
@@ -63,17 +68,9 @@ func (m *mkcert) makeCert(hosts []string) {
 			OrganizationalUnit: []string{userAndHostname},
 		},
 
-		NotAfter:  time.Now().AddDate(10, 0, 0),
+		NotBefore: time.Now(), NotAfter: expiration,
 
-		// Fix the notBefore to temporarily bypass macOS Catalina's limit on
-		// certificate lifespan. Once mkcert provides an ACME server, automation
-		// will be the recommended way to guarantee uninterrupted functionality,
-		// and the lifespan will be shortened to 825 days. See issue 174 and
-		// https://support.apple.com/en-us/HT210176.
-		NotBefore: time.Date(2019, time.June, 1, 0, 0, 0, 0, time.UTC),
-
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 	}
 
 	for _, h := range hosts {
@@ -89,12 +86,13 @@ func (m *mkcert) makeCert(hosts []string) {
 	}
 
 	if m.client {
-		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
-	} else if len(tpl.IPAddresses) > 0 || len(tpl.DNSNames) > 0 {
-		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
+	if len(tpl.IPAddresses) > 0 || len(tpl.DNSNames) > 0 || len(tpl.URIs) > 0 {
+		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
 	}
 	if len(tpl.EmailAddresses) > 0 {
-		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageCodeSigning, x509.ExtKeyUsageEmailProtection)
+		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageEmailProtection)
 	}
 
 	// IIS (the main target of PKCS #12 files), only shows the deprecated
@@ -109,15 +107,20 @@ func (m *mkcert) makeCert(hosts []string) {
 	certFile, keyFile, p12File := m.fileNames(hosts)
 
 	if !m.pkcs12 {
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert})
 		privDER, err := x509.MarshalPKCS8PrivateKey(priv)
 		fatalIfErr(err, "failed to encode certificate key")
-		err = ioutil.WriteFile(keyFile, pem.EncodeToMemory(
-			&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}), 0600)
-		fatalIfErr(err, "failed to save certificate key")
+		privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})
 
-		err = ioutil.WriteFile(certFile, pem.EncodeToMemory(
-			&pem.Block{Type: "CERTIFICATE", Bytes: cert}), 0644)
-		fatalIfErr(err, "failed to save certificate")
+		if certFile == keyFile {
+			err = ioutil.WriteFile(keyFile, append(certPEM, privPEM...), 0600)
+			fatalIfErr(err, "failed to save certificate and key")
+		} else {
+			err = ioutil.WriteFile(certFile, certPEM, 0644)
+			fatalIfErr(err, "failed to save certificate")
+			err = ioutil.WriteFile(keyFile, privPEM, 0600)
+			fatalIfErr(err, "failed to save certificate key")
+		}
 	} else {
 		domainCert, _ := x509.ParseCertificate(cert)
 		pfxData, err := pkcs12.Encode(rand.Reader, priv, domainCert, []*x509.Certificate{m.caCert}, "changeit")
@@ -129,11 +132,17 @@ func (m *mkcert) makeCert(hosts []string) {
 	m.printHosts(hosts)
 
 	if !m.pkcs12 {
-		log.Printf("\nThe certificate is at \"%s\" and the key at \"%s\" ✅\n\n", certFile, keyFile)
+		if certFile == keyFile {
+			log.Printf("\nThe certificate and key are at \"%s\" ✅\n\n", certFile)
+		} else {
+			log.Printf("\nThe certificate is at \"%s\" and the key at \"%s\" ✅\n\n", certFile, keyFile)
+		}
 	} else {
 		log.Printf("\nThe PKCS#12 bundle is at \"%s\" ✅\n", p12File)
 		log.Printf("\nThe legacy PKCS#12 encryption password is the often hardcoded default \"changeit\" ℹ️\n\n")
 	}
+
+	log.Printf("It will expire on %s 🗓\n\n", expiration.Format("2 January 2006"))
 }
 
 func (m *mkcert) printHosts(hosts []string) {
@@ -208,29 +217,38 @@ func (m *mkcert) makeCertFromCSR() {
 	if csrPEM == nil {
 		log.Fatalln("ERROR: failed to read the CSR: unexpected content")
 	}
-	if csrPEM.Type != "CERTIFICATE REQUEST" {
+	if csrPEM.Type != "CERTIFICATE REQUEST" &&
+		csrPEM.Type != "NEW CERTIFICATE REQUEST" {
 		log.Fatalln("ERROR: failed to read the CSR: expected CERTIFICATE REQUEST, got " + csrPEM.Type)
 	}
 	csr, err := x509.ParseCertificateRequest(csrPEM.Bytes)
 	fatalIfErr(err, "failed to parse the CSR")
 	fatalIfErr(csr.CheckSignature(), "invalid CSR signature")
 
+	expiration := time.Now().AddDate(2, 3, 0)
 	tpl := &x509.Certificate{
 		SerialNumber:    randomSerialNumber(),
 		Subject:         csr.Subject,
-		ExtraExtensions: csr.Extensions, // includes requested SANs
+		ExtraExtensions: csr.Extensions, // includes requested SANs, KUs and EKUs
 
-		NotAfter:  time.Now().AddDate(10, 0, 0),
-		NotBefore: time.Now(),
-
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
+		NotBefore: time.Now(), NotAfter: expiration,
 
 		// If the CSR does not request a SAN extension, fix it up for them as
 		// the Common Name field does not work in modern browsers. Otherwise,
 		// this will get overridden.
 		DNSNames: []string{csr.Subject.CommonName},
+
+		// Likewise, if the CSR does not set KUs and EKUs, fix it up as Apple
+		// platforms require serverAuth for TLS.
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	if m.client {
+		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
+	if len(csr.EmailAddresses) > 0 {
+		tpl.ExtKeyUsage = append(tpl.ExtKeyUsage, x509.ExtKeyUsageEmailProtection)
 	}
 
 	cert, err := x509.CreateCertificate(rand.Reader, tpl, m.caCert, csr.PublicKey, m.caKey)
@@ -242,8 +260,8 @@ func (m *mkcert) makeCertFromCSR() {
 	for _, ip := range csr.IPAddresses {
 		hosts = append(hosts, ip.String())
 	}
-	if len(hosts) == 0 {
-		hosts = []string{csr.Subject.CommonName}
+	for _, uri := range csr.URIs {
+		hosts = append(hosts, uri.String())
 	}
 	certFile, _, _ := m.fileNames(hosts)
 
@@ -254,14 +272,14 @@ func (m *mkcert) makeCertFromCSR() {
 	m.printHosts(hosts)
 
 	log.Printf("\nThe certificate is at \"%s\" ✅\n\n", certFile)
+
+	log.Printf("It will expire on %s 🗓\n\n", expiration.Format("2 January 2006"))
 }
 
 // loadCA will load or create the CA at CAROOT.
 func (m *mkcert) loadCA() {
 	if !pathExists(filepath.Join(m.CAROOT, rootName)) {
 		m.newCA()
-	} else {
-		log.Printf("Using the local CA at \"%s\" ✨\n", m.CAROOT)
 	}
 
 	certPEMBlock, err := ioutil.ReadFile(filepath.Join(m.CAROOT, rootName))
@@ -340,7 +358,7 @@ func (m *mkcert) newCA() {
 		&pem.Block{Type: "CERTIFICATE", Bytes: cert}), 0644)
 	fatalIfErr(err, "failed to save CA key")
 
-	log.Printf("Created a new local CA at \"%s\" 💥\n", m.CAROOT)
+	log.Printf("Created a new local CA 💥\n")
 }
 
 func (m *mkcert) caUniqueName() string {
